@@ -1,0 +1,10 @@
+build/
+install/
+log/
+.codex
+
+.DS_Store
+Thumbs.db
+
+*.pyc
+__pycache__/
