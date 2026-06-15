@@ -155,6 +155,8 @@ public:
     point_cloud_range_stride_ = declare_parameter<int>("point_cloud_range_stride", 4);
     point_cloud_beam_stride_ = declare_parameter<int>("point_cloud_beam_stride", 2);
     point_cloud_frame_id_ = declare_parameter<std::string>("point_cloud_frame_id", "oculus_sonar");
+    point_cloud_invert_bearing_ =
+      declare_parameter<bool>("point_cloud_invert_bearing", true);
 
     ping_raw_pub_ = create_publisher<std_msgs::msg::UInt8MultiArray>(ping_raw_topic_, 10);
     ping_image_pub_ = create_publisher<sensor_msgs::msg::Image>(ping_image_topic_, 10);
@@ -537,8 +539,11 @@ private:
           continue;
         }
 
-        const double bearing_rad =
+        double bearing_rad =
           (static_cast<double>(decoded.bearings[b]) / 100.0) * M_PI / 180.0;
+        if (point_cloud_invert_bearing_) {
+          bearing_rad = -bearing_rad;
+        }
 
         PointXYZI point{};
         point.x = radius * static_cast<float>(std::cos(bearing_rad));
@@ -629,6 +634,7 @@ private:
   int point_cloud_range_stride_;
   int point_cloud_beam_stride_;
   std::string point_cloud_frame_id_;
+  bool point_cloud_invert_bearing_;
   rclcpp::TimerBase::SharedPtr fire_timer_;
 
   OculusPacketDecoder decoder_;

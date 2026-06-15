@@ -38,6 +38,7 @@ def generate_launch_description():
                 'point_cloud_range_stride': 4,
                 'point_cloud_beam_stride': 2,
                 'point_cloud_frame_id': 'oculus_sonar',
+                'point_cloud_invert_bearing': True,
             }],
         )
     ])

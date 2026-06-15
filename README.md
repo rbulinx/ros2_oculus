@@ -106,6 +106,11 @@ Point cloud:
 - `point_cloud_range_stride`
 - `point_cloud_beam_stride`
 - `point_cloud_frame_id`
+- `point_cloud_invert_bearing`
+
+`point_cloud_invert_bearing` negates the bearing when generating the point cloud so
+Oculus right-positive bearings follow the ROS left-positive convention (REP-103).
+It defaults to `true`.
 
 ## Examples
 

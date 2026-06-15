@@ -106,6 +106,10 @@ Fire 要求:
 - `point_cloud_range_stride`
 - `point_cloud_beam_stride`
 - `point_cloud_frame_id`
+- `point_cloud_invert_bearing`
+
+`point_cloud_invert_bearing` は、Oculus の右正方位を ROS の左正（REP-103）へ
+合わせるため、点群生成時に bearing の符号を反転します。既定値は `true` です。
 
 ## 使用例
 
