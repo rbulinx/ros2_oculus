@@ -1,0 +1,38 @@
+cable_tracker_node:
+  ros__parameters:
+    camera_topic: /rov/camera/image/compressed
+    sonar_image_topic: /oculus/ping/image
+    sonar_bearings_topic: /oculus/ping/bearings
+    sonar_metadata_topic: /oculus/ping/metadata
+    output_prefix: /cable_tracking
+    sonar_frame_id: oculus_sonar
+
+    # OpenCV HSV values: H=0..179, S=0..255, V=0..255.
+    camera.hsv_lower_h: 35
+    camera.hsv_lower_s: 70
+    camera.hsv_lower_v: 35
+    camera.hsv_upper_h: 95
+    camera.hsv_upper_s: 255
+    camera.hsv_upper_v: 255
+    camera.roi_top_fraction: 0.15
+    camera.row_step: 4
+    camera.morphology_kernel: 5
+    camera.minimum_rows: 12
+    camera.lookahead_fraction: 0.80
+    camera.horizontal_fov_deg: 90.0
+    camera.minimum_confidence: 0.20
+    camera.timeout_sec: 0.5
+
+    # Positive yaw is left in the oculus_sonar frame.
+    camera_to_sonar_yaw_deg: 0.0
+
+    sonar.history_length: 5
+    sonar.required_hits: 3
+    sonar.intensity_threshold: 0.25
+    sonar.morphology_kernel: 3
+    sonar.minimum_cluster_pixels: 8
+    # A wider gate tolerates camera/sonar parallax for targets closer than 2 m.
+    sonar.camera_bearing_gate_deg: 30.0
+    sonar.invert_bearing: true
+    sonar.point_cloud_stride: 2
+    sonar.overlay_timeout_sec: 1.0

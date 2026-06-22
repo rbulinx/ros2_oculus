@@ -127,6 +127,8 @@ public:
   {
     sonar_address_ = declare_parameter<std::string>("sonar_address", "");
     sonar_data_port_ = declare_parameter<int>("sonar_data_port", 52100);
+    reconnect_interval_sec_ =
+      std::max(0.1, declare_parameter<double>("reconnect_interval_sec", 1.0));
     status_bind_address_ = declare_parameter<std::string>("status_bind_address", "0.0.0.0");
     status_udp_port_ = declare_parameter<int>("status_udp_port", 52102);
     tcp_receive_buffer_size_ = declare_parameter<int>("tcp_receive_buffer_size", 200000);
@@ -170,9 +172,7 @@ public:
         get_logger(),
         "Parameter 'sonar_address' is empty. TCP ping-result reception is disabled until it is set.");
     } else {
-      data_socket_fd_ = open_tcp_socket(sonar_address_, sonar_data_port_);
       if (auto_fire_) {
-        send_simple_fire();
         fire_timer_ = create_wall_timer(
           std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::duration<double>(fire_interval_sec_)),
@@ -181,7 +181,7 @@ public:
       data_thread_ = std::thread(&OculusBridgeNode::data_loop, this);
       RCLCPP_INFO(
         get_logger(),
-        "Connected to Oculus sonar TCP data stream at %s:%d.",
+        "Connecting to Oculus sonar TCP data stream at %s:%d.",
         sonar_address_.c_str(), sonar_data_port_);
     }
 
@@ -197,11 +197,7 @@ public:
   {
     running_.store(false);
 
-    if (data_socket_fd_ >= 0) {
-      shutdown(data_socket_fd_, SHUT_RDWR);
-      close(data_socket_fd_);
-      data_socket_fd_ = -1;
-    }
+    close_data_socket();
 
     if (status_socket_fd_ >= 0) {
       shutdown(status_socket_fd_, SHUT_RDWR);
@@ -291,11 +287,45 @@ private:
     rx_buffer.reserve(static_cast<size_t>(tcp_receive_buffer_size_));
     std::vector<uint8_t> read_buffer(static_cast<size_t>(tcp_receive_buffer_size_));
 
-    while (rclcpp::ok() && running_.load() && data_socket_fd_ >= 0) {
-      const ssize_t bytes_read = recv(data_socket_fd_, read_buffer.data(), read_buffer.size(), 0);
+    while (rclcpp::ok() && running_.load()) {
+      int socket_fd = current_data_socket();
+      if (socket_fd < 0) {
+        try {
+          const int new_socket = open_tcp_socket(sonar_address_, sonar_data_port_);
+          {
+            std::lock_guard<std::mutex> lock(data_socket_mutex_);
+            if (!running_.load()) {
+              shutdown(new_socket, SHUT_RDWR);
+              close(new_socket);
+              break;
+            }
+            data_socket_fd_ = new_socket;
+            socket_fd = new_socket;
+          }
+          rx_buffer.clear();
+          RCLCPP_INFO(
+            get_logger(), "Connected to Oculus sonar TCP data stream at %s:%d.",
+            sonar_address_.c_str(), sonar_data_port_);
+          if (auto_fire_) {
+            send_simple_fire();
+          }
+        } catch (const std::exception & error) {
+          RCLCPP_WARN_THROTTLE(
+            get_logger(), *get_clock(), 5000,
+            "Oculus TCP reconnect failed: %s", error.what());
+          std::this_thread::sleep_for(std::chrono::duration<double>(reconnect_interval_sec_));
+          continue;
+        }
+      }
+
+      const ssize_t bytes_read = recv(socket_fd, read_buffer.data(), read_buffer.size(), 0);
       if (bytes_read == 0) {
-        RCLCPP_WARN(get_logger(), "Oculus TCP data stream closed by peer.");
-        break;
+        RCLCPP_WARN(
+          get_logger(), "Oculus TCP data stream closed by peer; reconnecting.");
+        close_data_socket(socket_fd);
+        rx_buffer.clear();
+        std::this_thread::sleep_for(std::chrono::duration<double>(reconnect_interval_sec_));
+        continue;
       }
       if (bytes_read < 0) {
         if (!running_.load()) {
@@ -306,7 +336,10 @@ private:
         }
         RCLCPP_WARN_THROTTLE(
           get_logger(), *get_clock(), 5000,
-          "TCP recv failed: %s", std::strerror(errno));
+          "TCP recv failed, reconnecting: %s", std::strerror(errno));
+        close_data_socket(socket_fd);
+        rx_buffer.clear();
+        std::this_thread::sleep_for(std::chrono::duration<double>(reconnect_interval_sec_));
         continue;
       }
 
@@ -317,10 +350,6 @@ private:
 
   void send_simple_fire()
   {
-    if (data_socket_fd_ < 0) {
-      return;
-    }
-
     std::vector<uint8_t> packet;
     packet.reserve(
       fire_message_version_ == 2 ? sizeof(OculusSimpleFireMessage2) : sizeof(OculusSimpleFireMessage));
@@ -363,13 +392,37 @@ private:
       std::memcpy(packet.data(), &fire, sizeof(fire));
     }
 
-    std::lock_guard<std::mutex> lock(write_mutex_);
-    const ssize_t sent = send(data_socket_fd_, packet.data(), packet.size(), 0);
+    std::lock_guard<std::mutex> lock(data_socket_mutex_);
+    if (data_socket_fd_ < 0) {
+      return;
+    }
+    const ssize_t sent =
+      send(data_socket_fd_, packet.data(), packet.size(), MSG_NOSIGNAL);
     if (sent < 0) {
       RCLCPP_WARN_THROTTLE(
         get_logger(), *get_clock(), 5000,
         "Failed to send SimpleFire request: %s", std::strerror(errno));
+      shutdown(data_socket_fd_, SHUT_RDWR);
+      close(data_socket_fd_);
+      data_socket_fd_ = -1;
     }
+  }
+
+  int current_data_socket()
+  {
+    std::lock_guard<std::mutex> lock(data_socket_mutex_);
+    return data_socket_fd_;
+  }
+
+  void close_data_socket(int expected_socket = -1)
+  {
+    std::lock_guard<std::mutex> lock(data_socket_mutex_);
+    if (data_socket_fd_ < 0 || (expected_socket >= 0 && data_socket_fd_ != expected_socket)) {
+      return;
+    }
+    shutdown(data_socket_fd_, SHUT_RDWR);
+    close(data_socket_fd_);
+    data_socket_fd_ = -1;
   }
 
   void process_tcp_buffer(std::vector<uint8_t> & buffer)
@@ -603,10 +656,11 @@ private:
   int status_socket_fd_{-1};
   std::thread data_thread_;
   std::thread status_thread_;
-  std::mutex write_mutex_;
+  std::mutex data_socket_mutex_;
 
   std::string sonar_address_;
   int sonar_data_port_;
+  double reconnect_interval_sec_;
   std::string status_bind_address_;
   int status_udp_port_;
   int tcp_receive_buffer_size_;

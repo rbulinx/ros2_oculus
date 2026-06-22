@@ -1,0 +1,24 @@
+unity_mavlink_bridge:
+  ros__parameters:
+    unity_ip: 192.168.50.177
+    unity_port: 14550
+    send_rate_hz: 20.0
+    command_timeout_seconds: 0.5
+    target_system: 1
+    invert_sway: false
+    invert_heave: false
+    invert_yaw: false
+
+cable_follow_controller:
+  ros__parameters:
+    enabled: true
+    target_distance_m: 2.0
+    control_rate_hz: 20.0
+    tracking_timeout_seconds: 0.5
+    manual_timeout_seconds: 0.5
+    distance_kp: 0.35
+    maximum_surge: 0.40
+    distance_deadband_m: 0.10
+    sway_kp: 0.80
+    maximum_sway: 0.50
+    center_deadband: 0.03

@@ -12,6 +12,7 @@ def generate_launch_description():
             parameters=[{
                 'sonar_address': '',
                 'sonar_data_port': 52100,
+                'reconnect_interval_sec': 1.0,
                 'status_bind_address': '0.0.0.0',
                 'status_udp_port': 52102,
                 'tcp_receive_buffer_size': 200000,
