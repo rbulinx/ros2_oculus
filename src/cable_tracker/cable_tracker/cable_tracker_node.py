@@ -14,6 +14,7 @@ from sensor_msgs.msg import CompressedImage, Image, PointCloud2, PointField
 from std_msgs.msg import Float32MultiArray, Int16MultiArray, String
 
 from cable_tracker.tracking import (
+    CameraTrackLatch,
     CameraTrack,
     SonarPersistenceTracker,
     SonarTrack,
@@ -68,7 +69,20 @@ class CableTrackerNode(Node):
         self.camera_minimum_confidence = float(
             self.declare_parameter("camera.minimum_confidence", 0.20).value
         )
+        self.camera_latch = CameraTrackLatch(
+            acquire_frames=int(self.declare_parameter("camera.acquire_frames", 2).value),
+            loss_grace_seconds=float(
+                self.declare_parameter("camera.loss_grace_seconds", 0.20).value
+            ),
+            minimum_confidence=self.camera_minimum_confidence,
+        )
         self.camera_timeout_sec = float(self.declare_parameter("camera.timeout_sec", 0.5).value)
+        self.camera_debug_max_width = int(
+            self.declare_parameter("camera.debug_max_width", 0).value
+        )
+        self.camera_debug_max_height = int(
+            self.declare_parameter("camera.debug_max_height", 0).value
+        )
         self.camera_to_sonar_yaw = math.radians(
             float(self.declare_parameter("camera_to_sonar_yaw_deg", 0.0).value)
         )
@@ -164,7 +178,7 @@ class CableTrackerNode(Node):
             self.get_logger().warning("Failed to decode the compressed camera image.")
             return
 
-        track = track_green_cable(
+        raw_track = track_green_cable(
             bgr=bgr,
             hsv_lower=self.hsv_lower,
             hsv_upper=self.hsv_upper,
@@ -175,6 +189,8 @@ class CableTrackerNode(Node):
             lookahead_fraction=self.camera_lookahead,
             horizontal_fov_rad=self.camera_horizontal_fov,
         )
+        now_seconds = self.get_clock().now().nanoseconds / 1.0e9
+        track, camera_held = self.camera_latch.update(raw_track, now_seconds)
         self.latest_camera_track = track
         self.latest_camera_time_ns = self.get_clock().now().nanoseconds
 
@@ -182,11 +198,7 @@ class CableTrackerNode(Node):
         if track.detected:
             polyline = np.rint(track.centerline).astype(np.int32).reshape((-1, 1, 2))
             cv2.polylines(debug, [polyline], False, (0, 0, 255), 3, cv2.LINE_AA)
-            lookahead_y = int(np.clip(self.camera_lookahead, 0.0, 1.0) * (bgr.shape[0] - 1))
-            lookahead_index = int(
-                np.argmin(np.abs(track.centerline[:, 1] - lookahead_y))
-            )
-            target = tuple(np.rint(track.centerline[lookahead_index]).astype(int))
+            target = tuple(np.rint(track.target_pixel).astype(int))
             cv2.circle(debug, target, 8, (255, 0, 255), -1, cv2.LINE_AA)
             text = (
                 f"lateral={track.lateral_error:+.2f} "
@@ -195,12 +207,28 @@ class CableTrackerNode(Node):
             )
             cv2.putText(debug, text, (20, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.7,
                         (255, 255, 255), 2, cv2.LINE_AA)
+            if camera_held:
+                cv2.putText(
+                    debug,
+                    "CAMERA HOLD",
+                    (20, 98),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.7,
+                    (0, 165, 255),
+                    2,
+                    cv2.LINE_AA,
+                )
         else:
             cv2.putText(debug, "CABLE LOST", (20, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.8,
                         (0, 0, 255), 2, cv2.LINE_AA)
 
         self._draw_sonar_overlay(debug, track)
 
+        debug = self._fit_debug_image(
+            debug,
+            max_width=self.camera_debug_max_width,
+            max_height=self.camera_debug_max_height,
+        )
         self.camera_debug_pub.publish(self._bgr_image_message(debug, message.header))
         self.camera_mask_pub.publish(self._mono_image_message(track.mask, message.header))
         observation = Float32MultiArray()
@@ -510,6 +538,18 @@ class CableTrackerNode(Node):
             cv2.putText(debug, text, (5, 18), cv2.FONT_HERSHEY_SIMPLEX, 0.45,
                         (255, 255, 255), 1, cv2.LINE_AA)
         return self._bgr_image_message(debug, header)
+
+    @staticmethod
+    def _fit_debug_image(image: np.ndarray, max_width: int, max_height: int) -> np.ndarray:
+        if max_width <= 0 or max_height <= 0:
+            return image
+        height, width = image.shape[:2]
+        scale = min(max_width / float(width), max_height / float(height), 1.0)
+        if scale >= 1.0:
+            return image
+        resized_width = max(1, int(round(width * scale)))
+        resized_height = max(1, int(round(height * scale)))
+        return cv2.resize(image, (resized_width, resized_height), interpolation=cv2.INTER_AREA)
 
     @staticmethod
     def _bgr_image_message(image: np.ndarray, header) -> Image:

@@ -18,7 +18,18 @@ def generate_launch_description():
         "launch",
         "unity_mavlink_bridge.launch.py",
     )
+    ros_tcp_endpoint_launch = os.path.join(
+        get_package_share_directory("ros_tcp_endpoint"),
+        "launch",
+        "endpoint.py",
+    )
+    rviz_config = os.path.join(
+        get_package_share_directory("unity_mavlink_bridge"),
+        "config",
+        "sonar_point_cloud.rviz",
+    )
     return LaunchDescription([
+        IncludeLaunchDescription(PythonLaunchDescriptionSource(ros_tcp_endpoint_launch)),
         Node(
             package="oculus_bridge",
             executable="oculus_bridge_node",
@@ -30,9 +41,24 @@ def generate_launch_description():
                 "reconnect_interval_sec": 1.0,
                 "auto_fire": True,
                 "fire_interval_sec": 1.0,
-                "fire_range_percent_or_meters": 5.0,
+                "fire_message_version": 2,
+                "fire_range_percent_or_meters": 55.0,
             }],
         ),
         IncludeLaunchDescription(PythonLaunchDescriptionSource(tracker_launch)),
         IncludeLaunchDescription(PythonLaunchDescriptionSource(control_launch)),
+        Node(
+            package="rqt_image_view",
+            executable="rqt_image_view",
+            name="cable_follow_image_view",
+            arguments=["/cable_tracking/camera/debug"],
+            output="screen",
+        ),
+        Node(
+            package="rviz2",
+            executable="rviz2",
+            name="sonar_point_cloud_view",
+            arguments=["-d", rviz_config],
+            output="screen",
+        ),
     ])

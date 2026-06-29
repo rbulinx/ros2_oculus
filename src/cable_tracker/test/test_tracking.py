@@ -6,6 +6,8 @@ import cv2
 import numpy as np
 
 from cable_tracker.tracking import (
+    CameraTrack,
+    CameraTrackLatch,
     SonarPersistenceTracker,
     sonar_bearing_to_image_x,
     track_green_cable,
@@ -33,8 +35,59 @@ def test_camera_tracker_handles_a_wide_float():
 
     assert result.detected
     assert result.confidence > 0.6
-    assert 0.0 < result.lateral_error < 0.3
+    assert abs(result.lateral_error) < 0.15
     assert result.centerline.shape[0] > 20
+    assert np.max(np.linalg.norm(np.diff(result.centerline, axis=0), axis=1)) < 10.0
+
+
+def test_camera_tracker_handles_horizontal_and_both_diagonals():
+    lines = [
+        ((40, 240), (600, 240)),
+        ((40, 400), (600, 80)),
+        ((40, 80), (600, 400)),
+    ]
+    for start, end in lines:
+        image = np.full((480, 640, 3), (80, 35, 10), dtype=np.uint8)
+        cv2.line(image, start, end, (0, 180, 0), 14, cv2.LINE_AA)
+        result = track_green_cable(
+            image,
+            hsv_lower=(35, 70, 35),
+            hsv_upper=(95, 255, 255),
+            roi_top_fraction=0.0,
+            row_step=4,
+            morphology_kernel=3,
+            minimum_rows=6,
+            lookahead_fraction=0.8,
+            horizontal_fov_rad=math.radians(90.0),
+        )
+
+        assert result.detected
+        assert result.confidence > 0.7
+        assert abs(result.lateral_error) < 0.1
+        assert result.centerline.shape[0] > 50
+        assert np.max(np.linalg.norm(np.diff(result.centerline, axis=0), axis=1)) < 10.0
+
+
+def test_camera_latch_bridges_short_dropout_then_reports_loss():
+    mask = np.ones((10, 10), dtype=np.uint8)
+    valid = CameraTrack(
+        detected=True,
+        mask=mask,
+        centerline=np.asarray([[1.0, 1.0], [8.0, 8.0]], dtype=np.float32),
+        confidence=0.8,
+    )
+    missing = CameraTrack(False, np.zeros_like(mask), np.empty((0, 2), dtype=np.float32))
+    latch = CameraTrackLatch(acquire_frames=2, loss_grace_seconds=0.2, minimum_confidence=0.1)
+
+    first, _ = latch.update(valid, 0.0)
+    acquired, _ = latch.update(valid, 0.05)
+    held, was_held = latch.update(missing, 0.15)
+    lost, _ = latch.update(missing, 0.30)
+
+    assert not first.detected
+    assert acquired.detected
+    assert held.detected and was_held
+    assert not lost.detected
 
 
 def test_sonar_tracker_rejects_flicker_and_keeps_persistent_target():

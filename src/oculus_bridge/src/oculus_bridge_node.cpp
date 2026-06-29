@@ -81,8 +81,12 @@ std::string ping_json(const DecodedPing & ping)
     << "\"heading\":" << ping.heading << ","
     << "\"pitch\":" << ping.pitch << ","
     << "\"roll\":" << ping.roll << ","
+    << "\"fire_range\":" << ping.fire_range << ","
+    << "\"fire_range_percent\":" << ping.fire_range_percent << ","
+    << "\"fire_gain_percent\":" << ping.fire_gain_percent << ","
     << "\"range_resolution\":" << ping.range_resolution << ","
     << "\"n_ranges\":" << ping.n_ranges << ","
+    << "\"range_m\":" << ping.range_resolution * static_cast<double>(ping.n_ranges) << ","
     << "\"n_beams\":" << ping.n_beams << ","
     << "\"data_size\":" << static_cast<int>(ping.data_size)
     << "}";

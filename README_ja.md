@@ -178,7 +178,7 @@ Unity の UDP 14550 番ポートへ MAVLink `MANUAL_CONTROL` として 20 Hz で
 - `linear.y`: 左右移動でカメラ上のターゲットを中央へ合わせる
 - `angular.z`: 常に0（Unity側のヘディングホールドへ干渉しない）
 - `linear.z`: `/rov/manual_cmd_vel.linear.z` の手動値をそのまま使用
-- ターゲットロスト時: surge、sway、yawを即時停止
+- カメラのターゲットロスト時: surge、sway、heave、yawをすべて停止
 
 起動:
 

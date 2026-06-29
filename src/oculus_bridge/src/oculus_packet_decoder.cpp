@@ -84,6 +84,9 @@ std::optional<DecodedPing> OculusPacketDecoder::decode_ping_packet(
     decoded.heading = ping.heading;
     decoded.pitch = ping.pitch;
     decoded.roll = ping.roll;
+    decoded.fire_range = 0.0;
+    decoded.fire_range_percent = ping.fire_message.range_percent;
+    decoded.fire_gain_percent = ping.fire_message.gain_percent;
     decoded.range_resolution = ping.range_resolution;
     decoded.n_ranges = ping.n_ranges;
     decoded.n_beams = ping.n_beams;
@@ -109,6 +112,9 @@ std::optional<DecodedPing> OculusPacketDecoder::decode_ping_packet(
     decoded.heading = 0.0;
     decoded.pitch = 0.0;
     decoded.roll = 0.0;
+    decoded.fire_range = ping.fire_message.range;
+    decoded.fire_range_percent = 0.0;
+    decoded.fire_gain_percent = ping.fire_message.gain_percent;
     decoded.range_resolution = ping.range_resolution;
     decoded.n_ranges = ping.n_ranges;
     decoded.n_beams = ping.n_beams;

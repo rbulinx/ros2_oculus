@@ -44,7 +44,7 @@ def test_fused_tracking_holds_two_meters_and_centers_target():
     assert result.distance_m == 3.0
 
 
-def test_lost_target_stops_automatic_axes_but_keeps_manual_heave():
+def test_lost_camera_stops_all_axes_including_manual_heave():
     result = compute_follow_command(
         {"state": "LOST"},
         manual_heave=0.3,
@@ -57,5 +57,26 @@ def test_lost_target_stops_automatic_axes_but_keeps_manual_heave():
         center_deadband=0.03,
     )
 
-    assert result.state == "LOST_STOP"
-    assert result.command == ManualControl(heave=0.3)
+    assert result.state == "CAMERA_LOST_STOP"
+    assert result.command == ManualControl()
+
+
+def test_sonar_only_still_stops_without_camera_confirmation():
+    result = compute_follow_command(
+        {
+            "state": "SONAR_ONLY",
+            "camera": {"detected": False},
+            "sonar": {"detected": True, "range_m": 3.0, "bearing_deg": -10.0},
+        },
+        manual_heave=-0.4,
+        target_distance_m=2.0,
+        distance_kp=0.35,
+        maximum_surge=0.4,
+        sway_kp=0.8,
+        maximum_sway=0.5,
+        distance_deadband_m=0.1,
+        center_deadband=0.03,
+    )
+
+    assert result.state == "CAMERA_LOST_STOP"
+    assert result.command == ManualControl()

@@ -22,6 +22,9 @@ struct DecodedPing
   double heading;
   double pitch;
   double roll;
+  double fire_range;
+  double fire_range_percent;
+  double fire_gain_percent;
   double range_resolution;
   uint16_t n_ranges;
   uint16_t n_beams;

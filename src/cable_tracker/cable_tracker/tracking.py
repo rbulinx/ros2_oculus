@@ -1,7 +1,7 @@
 """Image-space cable extraction and temporal sonar filtering algorithms."""
 
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import math
 from typing import Optional
 
@@ -20,6 +20,7 @@ class CameraTrack:
     bearing_rad: float = 0.0
     heading_error_rad: float = 0.0
     confidence: float = 0.0
+    target_pixel: tuple[float, float] = (0.0, 0.0)
 
 
 @dataclass
@@ -55,6 +56,103 @@ def sonar_bearing_to_image_x(
     return pixel_x, -1.0 <= normalized_x <= 1.0
 
 
+def _skeletonize(mask: np.ndarray) -> np.ndarray:
+    """Return a connected one-pixel Zhang-Suen skeleton without opencv-contrib."""
+    image = (mask > 0).astype(np.uint8)
+
+    def neighbors(source: np.ndarray) -> tuple[np.ndarray, ...]:
+        padded = np.pad(source, 1, mode="constant")
+        return (
+            padded[:-2, 1:-1],   # p2: north
+            padded[:-2, 2:],     # p3: north-east
+            padded[1:-1, 2:],    # p4: east
+            padded[2:, 2:],      # p5: south-east
+            padded[2:, 1:-1],    # p6: south
+            padded[2:, :-2],     # p7: south-west
+            padded[1:-1, :-2],   # p8: west
+            padded[:-2, :-2],    # p9: north-west
+        )
+
+    changed = True
+    while changed:
+        changed = False
+        for first_step in (True, False):
+            adjacent = neighbors(image)
+            neighbor_count = np.sum(adjacent, axis=0)
+            transitions = sum(
+                ((adjacent[index] == 0) & (adjacent[(index + 1) % 8] == 1))
+                for index in range(8)
+            )
+            p2, _, p4, _, p6, _, p8, _ = adjacent
+            if first_step:
+                triplet_a = p2 * p4 * p6
+                triplet_b = p4 * p6 * p8
+            else:
+                triplet_a = p2 * p4 * p8
+                triplet_b = p2 * p6 * p8
+            remove = (
+                (image == 1)
+                & (neighbor_count >= 2)
+                & (neighbor_count <= 6)
+                & (transitions == 1)
+                & (triplet_a == 0)
+                & (triplet_b == 0)
+            )
+            if np.any(remove):
+                image[remove] = 0
+                changed = True
+    return image * 255
+
+
+def _farthest_skeleton_point(
+    points: set[tuple[int, int]],
+    start: tuple[int, int],
+) -> tuple[tuple[int, int], dict[tuple[int, int], tuple[int, int]]]:
+    """Find an approximate graph-diameter endpoint with one breadth-first pass."""
+    queue = deque([start])
+    distance = {start: 0}
+    parent: dict[tuple[int, int], tuple[int, int]] = {}
+    farthest = start
+    neighbors = (
+        (-1, -1), (-1, 0), (-1, 1),
+        (0, -1), (0, 1),
+        (1, -1), (1, 0), (1, 1),
+    )
+    while queue:
+        current = queue.popleft()
+        if distance[current] > distance[farthest]:
+            farthest = current
+        for dy, dx in neighbors:
+            candidate = (current[0] + dy, current[1] + dx)
+            if candidate in points and candidate not in distance:
+                distance[candidate] = distance[current] + 1
+                parent[candidate] = current
+                queue.append(candidate)
+    return farthest, parent
+
+
+def _longest_skeleton_path(skeleton: np.ndarray) -> np.ndarray:
+    """Extract one continuous graph-diameter path and ignore side branches."""
+    component_count, component_labels = cv2.connectedComponents(skeleton, connectivity=8)
+    if component_count <= 1:
+        return np.empty((0, 2), dtype=np.float32)
+    component_sizes = np.bincount(component_labels.ravel())
+    component_sizes[0] = 0
+    largest_component = int(np.argmax(component_sizes))
+    rows, columns = np.nonzero(component_labels == largest_component)
+    points = set(zip(rows.tolist(), columns.tolist()))
+    endpoint_a, _ = _farthest_skeleton_point(points, next(iter(points)))
+    endpoint_b, parent = _farthest_skeleton_point(points, endpoint_a)
+    path = [endpoint_b]
+    while path[-1] != endpoint_a:
+        previous = parent.get(path[-1])
+        if previous is None:
+            break
+        path.append(previous)
+    path.reverse()
+    return np.asarray([(column, row) for row, column in path], dtype=np.float32)
+
+
 def track_green_cable(
     bgr: np.ndarray,
     hsv_lower: tuple[int, int, int],
@@ -66,7 +164,7 @@ def track_green_cable(
     lookahead_fraction: float,
     horizontal_fov_rad: float,
 ) -> CameraTrack:
-    """Estimate a cable centerline without assuming a fixed cable width or shape."""
+    """Estimate an orientation-independent skeleton centerline."""
     height, width = bgr.shape[:2]
     hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
     mask = cv2.inRange(
@@ -89,12 +187,11 @@ def track_green_cable(
     best_label = 0
     best_score = 0.0
     for label in range(1, count):
-        x, y, component_width, component_height, area = stats[label]
+        _, _, component_width, component_height, area = stats[label]
         if area < minimum_rows:
             continue
-        bottom_fraction = (y + component_height) / max(1, height)
-        vertical_coverage = component_height / max(1, height - roi_top)
-        score = area * (0.5 + bottom_fraction) * (0.5 + vertical_coverage)
+        component_span = math.hypot(component_width, component_height)
+        score = area * (1.0 + component_span / max(1.0, math.hypot(width, height)))
         if score > best_score:
             best_score = score
             best_label = label
@@ -103,60 +200,44 @@ def track_green_cable(
         return CameraTrack(False, mask, np.empty((0, 2), dtype=np.float32))
 
     cable_mask = np.where(labels == best_label, 255, 0).astype(np.uint8)
-    samples = []
-    weights = []
-    for y in range(roi_top, height, max(1, int(row_step))):
-        xs = np.flatnonzero(cable_mask[y])
-        if xs.size == 0:
-            continue
-        samples.append((float(np.median(xs)), float(y)))
-        # A float can make the component wide. It should influence the centerline less.
-        weights.append(1.0 / math.sqrt(float(xs.size)))
+    skeleton = _skeletonize(cable_mask)
+    path = _longest_skeleton_path(skeleton)
+    minimum_points = max(8, int(minimum_rows))
+    if path.shape[0] < minimum_points:
+        return CameraTrack(False, cable_mask, path)
 
-    if len(samples) < minimum_rows:
-        return CameraTrack(False, cable_mask, np.asarray(samples, dtype=np.float32))
+    path_points = path.astype(np.float64)
+    center = np.mean(path_points, axis=0)
+    covariance = np.cov(path_points - center, rowvar=False)
+    _, eigenvectors = np.linalg.eigh(covariance)
+    axis = eigenvectors[:, -1]
+    if (abs(axis[1]) >= abs(axis[0]) and axis[1] > 0.0) or (
+        abs(axis[0]) > abs(axis[1]) and axis[0] < 0.0
+    ):
+        axis = -axis
 
-    points = np.asarray(samples, dtype=np.float64)
-    y_normalized = points[:, 1] / max(1.0, float(height - 1))
-    x_normalized = (points[:, 0] - width * 0.5) / max(1.0, width * 0.5)
-    fit_weights = np.asarray(weights, dtype=np.float64)
-    degree = min(2, len(samples) - 1)
-    inliers = np.ones(len(samples), dtype=bool)
+    sample_step = max(1, int(row_step))
+    centerline = path[::sample_step]
+    if not np.array_equal(centerline[-1], path[-1]):
+        centerline = np.vstack((centerline, path[-1]))
+    if centerline.shape[0] < minimum_points:
+        return CameraTrack(False, cable_mask, centerline)
 
-    # Two robust fitting passes reject particles and broad asymmetric float edges.
-    for _ in range(2):
-        coefficients = np.polyfit(
-            y_normalized[inliers],
-            x_normalized[inliers],
-            degree,
-            w=fit_weights[inliers],
-        )
-        residual = np.abs(x_normalized - np.polyval(coefficients, y_normalized))
-        median = float(np.median(residual))
-        limit = max(0.025, 3.0 * median)
-        new_inliers = residual <= limit
-        if np.count_nonzero(new_inliers) < minimum_rows:
-            break
-        inliers = new_inliers
+    normalized_dx = (centerline[:, 0] - width * 0.5) / max(1.0, width * 0.5)
+    normalized_dy = (centerline[:, 1] - height * 0.5) / max(1.0, height * 0.5)
+    target_index = int(np.argmin(normalized_dx ** 2 + normalized_dy ** 2))
+    target_x = float(centerline[target_index, 0])
+    target_y = float(centerline[target_index, 1])
+    target_x_normalized = float(
+        np.clip((target_x - width * 0.5) / max(1.0, width * 0.5), -1.0, 1.0)
+    )
 
-    lookahead_y = float(np.clip(lookahead_fraction, roi_top_fraction, 1.0))
-    target_x_normalized = float(np.clip(np.polyval(coefficients, lookahead_y), -1.0, 1.0))
-    derivative = float(np.polyval(np.polyder(coefficients), lookahead_y))
-    pixel_slope = derivative * (width * 0.5) / max(1.0, height - 1.0)
-
-    fitted_y = np.linspace(roi_top_fraction, 1.0, 80)
-    fitted_x = np.polyval(coefficients, fitted_y)
-    centerline = np.column_stack(
-        (
-            (fitted_x * width * 0.5 + width * 0.5),
-            fitted_y * (height - 1),
-        )
-    ).astype(np.float32)
-
-    coverage = len(samples) * max(1, int(row_step)) / max(1.0, height - roi_top)
-    inlier_ratio = np.count_nonzero(inliers) / len(samples)
-    confidence = float(np.clip(coverage * inlier_ratio, 0.0, 1.0))
+    segment_lengths = np.linalg.norm(np.diff(path_points, axis=0), axis=1)
+    path_length = float(np.sum(segment_lengths))
+    image_diagonal = max(1.0, math.hypot(width, height))
+    confidence = float(np.clip(path_length / (0.30 * image_diagonal), 0.0, 1.0))
     bearing_rad = math.atan(target_x_normalized * math.tan(horizontal_fov_rad * 0.5))
+    heading_error_rad = math.atan2(float(axis[0]), float(-axis[1]))
 
     return CameraTrack(
         detected=True,
@@ -164,9 +245,49 @@ def track_green_cable(
         centerline=centerline,
         lateral_error=target_x_normalized,
         bearing_rad=bearing_rad,
-        heading_error_rad=math.atan(pixel_slope),
+        heading_error_rad=heading_error_rad,
         confidence=confidence,
+        target_pixel=(target_x, target_y),
     )
+
+
+class CameraTrackLatch:
+    """Debounce acquisition and bridge only short camera-detection dropouts."""
+
+    def __init__(
+        self,
+        acquire_frames: int,
+        loss_grace_seconds: float,
+        minimum_confidence: float,
+    ) -> None:
+        self.acquire_frames = max(1, int(acquire_frames))
+        self.loss_grace_seconds = max(0.0, float(loss_grace_seconds))
+        self.minimum_confidence = max(0.0, float(minimum_confidence))
+        self._hit_count = 0
+        self._last_good_time: Optional[float] = None
+        self._stable_track: Optional[CameraTrack] = None
+
+    def update(self, track: CameraTrack, now_seconds: float) -> tuple[CameraTrack, bool]:
+        valid = track.detected and track.confidence >= self.minimum_confidence
+        if valid:
+            self._hit_count += 1
+            self._last_good_time = now_seconds
+            if self._stable_track is not None or self._hit_count >= self.acquire_frames:
+                self._stable_track = track
+                return track, False
+            return replace(track, detected=False, confidence=0.0), False
+
+        self._hit_count = 0
+        if self._stable_track is not None and self._last_good_time is not None:
+            age = max(0.0, now_seconds - self._last_good_time)
+            if age <= self.loss_grace_seconds:
+                decay = 1.0 - age / max(1.0e-6, self.loss_grace_seconds)
+                return replace(
+                    self._stable_track,
+                    confidence=self._stable_track.confidence * decay,
+                ), True
+        self._stable_track = None
+        return replace(track, detected=False, confidence=0.0), False
 
 
 class SonarPersistenceTracker:

@@ -69,6 +69,14 @@ def compute_follow_command(
     sonar_detected = bool(sonar.get("detected", False))
     heave = finite_clamped(manual_heave)
 
+    # Camera cable loss is a hard stop, even if sonar still has a return or heave is held.
+    if not camera_detected:
+        return FollowResult(
+            command=ManualControl(),
+            state="CAMERA_LOST_STOP",
+            distance_m=None,
+        )
+
     surge = 0.0
     distance = None
     if sonar_detected:
@@ -88,34 +96,19 @@ def compute_follow_command(
                 )
 
     sway = 0.0
-    if camera_detected:
-        lateral_error = finite_clamped(camera.get("lateral_error", 0.0))
-        if abs(lateral_error) > max(0.0, center_deadband):
-            # Camera +x and Unity sway/y are both positive to the right.
-            sway = finite_clamped(
-                sway_kp * lateral_error,
-                -abs(maximum_sway),
-                abs(maximum_sway),
-            )
-    elif sonar_detected:
-        # Sonar bearing follows ROS convention (positive left), while Unity y is right-positive.
-        bearing_deg = sonar.get("bearing_deg", 0.0)
-        try:
-            bearing_deg = float(bearing_deg)
-        except (TypeError, ValueError):
-            bearing_deg = 0.0
-        if math.isfinite(bearing_deg):
-            sway = finite_clamped(
-                sway_kp * (-bearing_deg / 30.0),
-                -abs(maximum_sway),
-                abs(maximum_sway),
-            )
+    lateral_error = finite_clamped(camera.get("lateral_error", 0.0))
+    if abs(lateral_error) > max(0.0, center_deadband):
+        # Camera +x and Unity sway/y are both positive to the right.
+        sway = finite_clamped(
+            sway_kp * lateral_error,
+            -abs(maximum_sway),
+            abs(maximum_sway),
+        )
 
     if not sonar_detected:
         surge = 0.0
-    controller_state = state if (camera_detected or sonar_detected) else "LOST_STOP"
     return FollowResult(
         command=ManualControl(surge=surge, sway=sway, heave=heave, yaw=0.0),
-        state=controller_state,
+        state=state,
         distance_m=distance,
     )
